@@ -21,6 +21,17 @@
 #'   current state of the random number generator in the parent process.
 #'   integerish value - call \code{set.seed(mc.set.seed)} in the parent and then
 #'   continue as if \code{mc.set.seed} was \code{NA}.
+#'
+#'   In both (\code{NA}- and integerish-) cases, the state of the random number
+#'   generator, i.e. the object \code{.Random.seed} in the global environment,
+#'   is restored at the end of the function to what it was when \code{mclapply}
+#'   was called. If the random number generator is not yet initialized in the
+#'   current session, it is initialized internally (by calling \code{runif(1)})
+#'   and the resulting state is what gets restored later. In particular, this
+#'   means that the seed supplied as \code{mc.set.seed} does \emph{not} seed the
+#'   code following the call to \code{mclapply}. All this ensures that arguments
+#'   like \code{mc.cores}, \code{mc.force.fork} etc. can be adjusted without
+#'   affecting the state of the RNG outside of \code{mclapply}.
 #' @param mc.allow.fatal should fatal errors in child processes make
 #'   \code{mclapply} fail (\code{FALSE}, default) or merely trigger a warning
 #'   (\code{TRUE})?
@@ -48,11 +59,21 @@
 #'   if \code{mc.force.fork = TRUE}). This is useful if we expect failures due
 #'   to too many parallel processes, e.g. the Linux Out Of Memory Killer
 #'   sacrificing some of the child processes.
+#'
+#'   The environment variable "BMC_RETRY" indicates the current retry. A value
+#'   of "0" means first try, a value of "1" first \emph{re}try, etc.
+#' @param mc.retry.silent should the messages indicating both fatal and
+#'   non-fatal failures during all but the last retry be suppressed
+#'   (\code{TRUE}) or not (\code{FALSE}, default)?
+#' @param mc.retry.fixed.seed should \code{FUN} for a particular element of
+#'   \code{X} always be invoked with the same fixed seed (\code{TRUE}) or should
+#'   a different seed be used on each try (\code{FALSE}, default)? Only
+#'   effective if \code{mc.set.seed} is \code{NA} or a number.
 #' @param mc.fail.early should we try to fail fast after encountering the first
 #'   (non-fatal) error in \code{FUN}? Such errors will be recorded as objects of
 #'   classes \code{c("fail-early-error", "try-error")}.
 #' @param mc.dump.frames should we \code{\link[utils]{dump.frames}} on non-fatal
-#'   errors in \code{FUN}. The default "partial" omits the frames (roughly) up
+#'   errors in \code{FUN}? The default "partial" omits the frames (roughly) up
 #'   to the call of \code{FUN}. See \code{\link{etry}} for the other options.
 #' @param mc.dumpto where to save the result including the dumped frames if
 #'   \code{mc.dump.frames != "no" & mc.allow.error == FALSE}? Either the name of
@@ -63,9 +84,10 @@
 #'   parent process after \emph{all} calls of \code{FUN} of the current try (cf.
 #'   \code{mc.retry}), such that it can be captured, sinked etc. there. "output"
 #'   \emph{immediately} forwards the output to stdout of the parent; it cannot
-#'   be captured, sinked etc. there. For consistency, all of this also applies
-#'   if \code{FUN} is called directly from the main process, e.g. because
-#'   \code{mc.cores = 1}.
+#'   be captured, sinked etc. there. "ignore" means that the output is not
+#'   forwarded in any way to the parent process. For consistency, all of this
+#'   also applies if \code{FUN} is called directly from the main process, e.g.
+#'   because \code{mc.cores = 1}.
 #' @param mc.warnings,mc.messages,mc.conditions how should warnings, messages
 #'   and other conditions signaled by \code{FUN} be handled? "signal" records
 #'   all warnings/messages/conditions (in the child processes) and signals them
@@ -163,6 +185,29 @@
 #' @seealso \code{\link{copy2shm}}, \code{\link{char_map}},
 #'   \code{\link[parallel:mclapply]{parallel::mclapply}}
 #'
+#' @section Windows Support: On Windows, otherwise valid values for various
+#'   arguments are silently replaced as follows:
+#' \preformatted{  mc.cores <- 1L
+#'   mc.share.vectors <- Inf
+#'   mc.shm.ipc <- FALSE
+#'   mc.force.fork <- FALSE
+#'   mc.progress <- FALSE
+#'   if (mc.stdout == "output") mc.stdout <- "ignore"
+#'   if (mc.warnings == "output") mc.warnings <- "ignore"
+#'   if (mc.messages == "output") mc.messages <- "ignore"}
+#'
+#'   \bold{Note:} \code{\link[parallel:mclapply]{parallel::mclapply}} demands
+#'   \code{mc.cores} to be exactly 1 on Windows; \code{bettermc::mclapply} sets
+#'   it to 1 on Windows.
+#'
+#'   Furthermore, \code{\link[parallel:mclapply]{parallel::mclapply}} ignores
+#'   the following arguments on Windows: \code{mc.preschedule, mc.silent,
+#'   mc.cleanup, mc.allow.recursive, affinity.list}. For \code{mc.set.seed},
+#'   only the values \code{TRUE} and \code{FALSE} are ignored (by
+#'   \code{\link[parallel:mclapply]{parallel::mclapply}}); the other values are
+#'   handled by \code{bettermc::mclapply} as documented above.
+#'
+#'
 #' @section Lifecycle:
 #'   \ifelse{html}{\href{https://lifecycle.r-lib.org/articles/stages.html#stable}{\figure{lifecycle-stable.svg}{options:
 #'    alt='[Stable]'}}}{\strong{[Stable]}}
@@ -183,11 +228,13 @@ mclapply <- function(X, FUN, ...,
                      affinity.list = NULL,
                      mc.allow.fatal = FALSE, mc.allow.error = FALSE,
                      mc.retry = 0L,
+                     mc.retry.silent = FALSE,
+                     mc.retry.fixed.seed = FALSE,
                      mc.fail.early = !(mc.allow.error || mc.retry != 0L),
                      mc.dump.frames = c("partial", "full", "full_global", "no"),
                      mc.dumpto = ifelse(interactive(), "last.dump",
                                         "file://last.dump.rds"),
-                     mc.stdout = c("capture", "output"),
+                     mc.stdout = c("capture", "output", "ignore"),
                      mc.warnings = c("m_signal", "signal", "m_output", "output",
                                      "m_ignore", "ignore", "stop"),
                      mc.messages = c("m_signal", "signal", "m_output", "output",
@@ -217,6 +264,8 @@ mclapply <- function(X, FUN, ...,
   checkmate::assert_flag(mc.allow.fatal, null.ok = TRUE)
   checkmate::assert_flag(mc.allow.error)
   checkmate::assert_int(mc.retry)
+  checkmate::assert_flag(mc.retry.silent)
+  checkmate::assert_flag(mc.retry.fixed.seed)
   checkmate::assert_flag(mc.fail.early)
   checkmate::assert_string(mc.dumpto, min.chars = 1L)
   checkmate::assert_flag(mc.shm.ipc)
@@ -266,26 +315,53 @@ mclapply <- function(X, FUN, ...,
     warning("'mc.preschedule' must be false if 'affinity.list' is used")
   }
 
+  if (OSTYPE == "windows") {
+    mc.cores <- 1L
+    mc.share.vectors <- Inf
+    mc.shm.ipc <- FALSE
+    mc.force.fork <- FALSE
+    mc.progress <- FALSE
+    if (mc.stdout == "output") mc.stdout <- "ignore"
+    if (mc.warnings == "output") mc.warnings <- "ignore"
+    if (mc.messages == "output") mc.messages <- "ignore"
+  }
+
   FUN <- force(FUN)
 
   root_stop <- make_root_stop()
   root_warning <- make_root_warning()
 
   if (!isTRUE(mc.set.seed) && !isFALSE(mc.set.seed)) {
+    rng_state <- get0(".Random.seed", .GlobalEnv, inherits = FALSE)
+    if (is.null(rng_state)) {
+      stats::runif(1)  # init RNG
+      rng_state <- get0(".Random.seed", .GlobalEnv, inherits = FALSE)
+    }
+    on.exit(assign(".Random.seed", rng_state, .GlobalEnv), add = TRUE)
+
     if (!is.na(mc.set.seed)) set.seed(mc.set.seed)
     seeds_list <- lapply(seq_len(abs(mc.retry) + 1), function(i) {
       round(stats::runif(length(X), -.Machine$integer.max, .Machine$integer.max))
     })
+    if (mc.retry.fixed.seed) {
+      seeds_list[-1L] <- seeds_list[1L]
+    }
     mc.set.seed <- TRUE
   } else {
     seeds_list <- NULL
     seeds <- NULL
   }
 
+  # closure to convert an index w.r.t. X to an index w.r.t. the original X;
+  # X might be different from X_orig on retires;
+  # the index w.r.t. X_orig is needed to prefix output/messages/... and to name
+  # shm objects
+  X_idx2X_orig_idx <- function(i) X_seq[i]
+
   # define core ----
   # we need to cleanup after each try, hence the core function such that we can
   # use on.exit
-  core <- function(tries_left) {
+  core <- function(tries_left, try_idx) {
     # ppid is used to name POSIX shared memory objects and semaphores
     ppid <- Sys.getpid()
 
@@ -295,6 +371,8 @@ mclapply <- function(X, FUN, ...,
       timestamp <- as.character(round(as.numeric(Sys.time())))
     } else if (OSTYPE %in% c("linux", "solaris")) {
       timestamp <- as.character(round(as.numeric(Sys.time()) * 1000))
+    } else if (OSTYPE == "windows") {
+      timestamp <- "NOT_USED"
     } else {
       stop("unexpected value for OSTYPE: ", OSTYPE)
     }
@@ -311,7 +389,7 @@ mclapply <- function(X, FUN, ...,
     on.exit({
       if (mc.shm.ipc) {
         lapply(seq_along(X), function(i)
-          unlink_all_shm(paste0(shm_prefix, i, "_"), start = 0L))
+          unlink_all_shm(paste0(shm_prefix, X_idx2X_orig_idx(i), "_"), start = 0L))
       }
 
       # if mc.shm.ipc == TRUE, then we would generally not need to run
@@ -319,9 +397,9 @@ mclapply <- function(X, FUN, ...,
       # was already unlinked but some of the objects 1, 2, ... still exist
       if (!is.infinite(mc.share.vectors)) {
         lapply(seq_along(X), function(i)
-          unlink_all_shm(paste0(shm_prefix, i, "_"), start = 1L))
+          unlink_all_shm(paste0(shm_prefix, X_idx2X_orig_idx(i), "_"), start = 1L))
       }
-    })
+    }, add = TRUE)
 
 
     # create dedicated child process for printing progress bar ----
@@ -396,11 +474,14 @@ mclapply <- function(X, FUN, ...,
       X <- X[[mc.X.idx]]
 
       if (OSTYPE == "linux") {
-        stdout_pipe <- pipe(sprintf("sed -u 's/^/%5d: /' >&1", mc.X.idx))
-        stderr_pipe <- pipe(sprintf("sed -u 's/^/%5d: /' >&2", mc.X.idx))
+        stdout_pipe <- pipe(sprintf("sed -u 's|^|%d/%d: |' >&1", try_idx, X_idx2X_orig_idx(mc.X.idx)))
+        stderr_pipe <- pipe(sprintf("sed -u 's|^|%d/%d: |' >&2", try_idx, X_idx2X_orig_idx(mc.X.idx)))
       } else if (OSTYPE %in% c("macos", "solaris")) {
-        stdout_pipe <- pipe(sprintf("sed 's/^/%5d: /' >&1", mc.X.idx))
-        stderr_pipe <- pipe(sprintf("sed 's/^/%5d: /' >&2", mc.X.idx))
+        stdout_pipe <- pipe(sprintf("sed 's|^|%d/%d: |' >&1", try_idx, X_idx2X_orig_idx(mc.X.idx)))
+        stderr_pipe <- pipe(sprintf("sed 's|^|%d/%d: |' >&2", try_idx, X_idx2X_orig_idx(mc.X.idx)))
+      } else if (OSTYPE == "windows") {
+        stdout_pipe <- NULL
+        stderr_pipe <- NULL
       } else {
         root_stop("unexpected value for OSTYPE: ", OSTYPE)
       }
@@ -412,10 +493,12 @@ mclapply <- function(X, FUN, ...,
         on.exit(sink(), add = TRUE)
       }
 
-      on.exit(close(stdout_pipe), add = TRUE)
-      on.exit(close(stderr_pipe), add = TRUE)
+      if (OSTYPE != "windows") {
+        on.exit(close(stdout_pipe), add = TRUE)
+        on.exit(close(stderr_pipe), add = TRUE)
+      }
 
-      shm_prefix <- paste0(shm_prefix, mc.X.idx, "_")
+      shm_prefix <- paste0(shm_prefix, X_idx2X_orig_idx(mc.X.idx), "_")
 
       warnings <- list()
       if (mc.warnings == "signal") {
@@ -484,17 +567,19 @@ mclapply <- function(X, FUN, ...,
         chandler <- function(cond) NULL
       }
 
+      evar <- Sys.getenv("BMC_RETRY", unset = NA)
+      if (is.na(evar)) {
+        on.exit(Sys.unsetenv("BMC_RETRY"), add = TRUE)
+      } else {
+        # maybe a recursive call
+        on.exit(Sys.setenv(BMC_RETRY = evar), add = TRUE)
+      }
+      Sys.setenv(BMC_RETRY = try_idx)
+
       # evaluate FUN and handle errors (etry), warnings and messages;
       # res is always a one-element list except in case of error when it is an
       # etry-error-object
-      if (mc.stdout == "output") {
-        res <- etry(withCallingHandlers(list(FUN(X, ...)),
-                                        warning = whandler,
-                                        message = mhandler,
-                                        condition = chandler),
-                    silent = TRUE,
-                    dump.frames = if (tries_left) "no" else mc.dump.frames)
-      } else {
+      if (mc.stdout == "capture") {
         output <- capture.output(
           res <- etry(withCallingHandlers(list(FUN(X, ...)),
                                           warning = whandler,
@@ -504,6 +589,13 @@ mclapply <- function(X, FUN, ...,
                       dump.frames = if (tries_left) "no" else mc.dump.frames)
         )
         if (length(output)) attr(res, "bettermc_output") <- output
+      } else {
+        res <- etry(withCallingHandlers(list(FUN(X, ...)),
+                                        warning = whandler,
+                                        message = mhandler,
+                                        condition = chandler),
+                    silent = TRUE,
+                    dump.frames = if (tries_left) "no" else mc.dump.frames)
       }
 
 
@@ -549,10 +641,11 @@ mclapply <- function(X, FUN, ...,
 
     # apply wrapper ----
     # parallel-apply wrapper to seq_along(X)
-    X_seq <- if (mc.force.fork && length(X) == 1L) {
-      c(0L, 1L)
+    if (mc.force.fork && length(X) == 1L) {
+      X_seq <- c(0L, 1L)
+      affinity.list <- c(affinity.list, affinity.list)
     } else {
-      seq_along(X)
+      X_seq <- seq_along(X)
     }
     withCallingHandlers(
       res <- parallel::mclapply(
@@ -635,7 +728,7 @@ mclapply <- function(X, FUN, ...,
       res <- lapply(seq_along(res), function(i) {
         e <- res[[i]]
         if (!is.null(attr(e, "bettermc_output"))) {
-          cat(paste0(sprintf("%5d: ", i) ,attr(e, "bettermc_output")), sep = "\n")
+          cat(paste0(sprintf("%d/%d: ", try_idx, X_idx2X_orig_idx(i)) ,attr(e, "bettermc_output")), sep = "\n")
           attr(e, "bettermc_output") <- NULL
         }
         e
@@ -647,7 +740,7 @@ mclapply <- function(X, FUN, ...,
         e <- res[[i]]
         if (!is.null(attr(e, "bettermc_warnings"))) {
           lapply(attr(e, "bettermc_warnings"), function(w) {
-            w$message <- sprintf("%d: %s", i, w$message)
+            w$message <- sprintf("%d/%d: %s", try_idx, X_idx2X_orig_idx(i), w$message)
             warning(w)
           })
           attr(e, "bettermc_warnings") <- NULL
@@ -661,7 +754,7 @@ mclapply <- function(X, FUN, ...,
         e <- res[[i]]
         if (!is.null(attr(e, "bettermc_messages"))) {
           lapply(attr(e, "bettermc_messages"), function(m) {
-            m$message <- sprintf("%5d: %s", i, m$message)
+            m$message <- sprintf("%d/%d: %s", try_idx, X_idx2X_orig_idx(i), m$message)
             message(m)
           })
           attr(e, "bettermc_messages") <- NULL
@@ -675,7 +768,7 @@ mclapply <- function(X, FUN, ...,
         e <- res[[i]]
         if (!is.null(attr(e, "bettermc_conditions"))) {
           lapply(attr(e, "bettermc_conditions"), function(cond) {
-            cond$message <- sprintf("%5d: %s", i, cond$message)
+            cond$message <- sprintf("%d/%d: %s", try_idx, X_idx2X_orig_idx(i), cond$message)
             signalCondition(cond)
           })
           attr(e, "bettermc_conditions") <- NULL
@@ -684,17 +777,17 @@ mclapply <- function(X, FUN, ...,
       })
     }
 
-    if (tries_left && mc_fatal) {
-      msg <- "at least one scheduled core did not return results;" %\%
+    if (!mc.retry.silent && tries_left && mc_fatal) {
+      msg <- try_idx %+% ": at least one scheduled core did not return results;" %\%
         "maybe it was killed (by the Linux Out of Memory Killer ?) or there" %\%
         "was a fatal error in the forked process(es)"
       message(msg)
     }
 
-    if (tries_left &&
+    if (!mc.retry.silent && tries_left &&
         any(mc_error <- vapply(res, inherits, logical(1L), what = "etry-error"))) {
       orig_message <- res[[which(mc_error)[1]]]
-      msg <- "error(s) occured during mclapply; first original message:\n\n" %+%
+      msg <- try_idx %+% ": error(s) occured during mclapply; first original message:\n\n" %+%
         paste0(capture.output(orig_message), collapse = "\n")
       message(msg)
     }
@@ -733,7 +826,7 @@ mclapply <- function(X, FUN, ...,
       mc.compress.chars <- Inf
     }
 
-    res[X_seq] <- core(tries_left)
+    res[X_seq] <- core(tries_left, try_idx = i - 1L)
     X_seq <- which(unlist(lapply(res, function(e) is.null(e) || inherits(e, "try-error"))))
 
     if (length(X_seq) == 0L) break
@@ -773,10 +866,13 @@ mclapply <- function(X, FUN, ...,
   if (error_idx && !mc.allow.error && mc.dump.frames != "no") {
     if (grepl("^file://", mc.dumpto)) {
       file <- gsub("^file://", "", mc.dumpto)
-      saveRDS(res, file)
-      file <- normalizePath(file)
-      message("crash dump saved to file'", file, "'; for debugging the first error, use:\n'{last.dump <- readRDS(\"",
-              file, "\"); utils::debugger(attr(last.dump[[", error_idx, "]], \"dump.frames\"))}'")
+      if (inherits(try(saveRDS(res, file)), "try-error")) {
+        message("failed to save crash dump to ", file)
+      } else {
+        file <- normalizePath(file)
+        message("crash dump saved to file'", file, "'; for debugging the first error, use:\n'{last.dump <- readRDS(\"",
+                file, "\"); utils::debugger(attr(last.dump[[", error_idx, "]], \"dump.frames\"))}'")
+      }
     } else {
       assign(mc.dumpto, res, crash_dumps)
       message("crash dump saved to object '", mc.dumpto, "' in environment 'bettermc::crash_dumps';",

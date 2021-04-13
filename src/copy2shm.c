@@ -14,6 +14,8 @@
 #include <signal.h>
 #include <setjmp.h>
 
+#include "vg/memcheck.h"
+
 // https://github.com/wch/r-source/blob/tags/R-3-6-3/src/include/Defn.h#L409-L422
 typedef struct {
   union {
@@ -176,16 +178,22 @@ typedef struct allocator_data {
 
 void* shm_alloc(R_allocator_t *allocator, size_t size) {
   allocator_data *data = allocator->data;
-  if (size != data->size) {
+  if (size != data->size) {  // this should never happen (did X2VEC change in R?)
+    munmap(data->ptr, data->size);
+
+    size_t expected_size = data->size;
+    free(data);
+
     error("'shm_alloc' was asked for %zu bytes but expected %zu bytes.",
-          size, data->size);
+          size, expected_size);
   }
   return data->ptr;
 }
 
 void shm_free(R_allocator_t *allocator, void *addr) {
   allocator_data *data = allocator->data;
-  if (addr != data->ptr) {
+  if (addr != data->ptr) {  // this should never happen (bug in R?)
+    // something is very fishy here; don't even try to cleanup
     error("'addr' not equal to 'data->ptr' in 'shm_free'");
   }
 
@@ -226,13 +234,16 @@ SEXP allocate_from_shm(SEXP name, SEXP type, SEXP length, SEXP size,
   }
 #endif
 
-  // MAP_PRIVATE is crucial here; using MAP_SHARED would make unit test
-  // "changes to vectors allocate(d)_from_shm are private" fail
   void *sptr;
   if (asLogical(copy)) {
+    // here we use MAP_SHARED because we only copy from the mmaped region to the
+    // regularly allocated R vector and macOS does not support MAP_PRIVATE
     sptr = mmap(NULL, asReal(size),
-                PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+                PROT_READ, MAP_SHARED, fd, 0);
   } else {
+    // MAP_PRIVATE is crucial here; using MAP_SHARED would make unit test
+    // "changes to vectors allocate(d)_from_shm are private" fail;
+    // the caller ensures that we do not end up in this branch on macOS
     sptr = mmap(NULL, asReal(size),
                 PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
   }
@@ -259,40 +270,46 @@ SEXP allocate_from_shm(SEXP name, SEXP type, SEXP length, SEXP size,
 
 
   size_t expected_size;
+  size_t dataptr_size;
   switch(asInteger(type)) {
   case LGLSXP:
   case INTSXP:
     expected_size = INT2VEC((R_xlen_t) asReal(length)) * sizeof(VECREC);
+    dataptr_size = asReal(length) * sizeof(int);
     break;
   case REALSXP:
     expected_size = FLOAT2VEC((R_xlen_t) asReal(length)) * sizeof(VECREC);
+    dataptr_size = asReal(length) * sizeof(double);
     break;
   case CPLXSXP:
     expected_size = COMPLEX2VEC((R_xlen_t) asReal(length)) * sizeof(VECREC);
+    dataptr_size = asReal(length) * sizeof(Rcomplex);
     break;
   case RAWSXP:
     expected_size = BYTE2VEC((R_xlen_t) asReal(length)) * sizeof(VECREC);
+    dataptr_size = asReal(length);
     break;
   default:
+    shm_free(&allocator, sptr);
     error("unsupported SEXP type: %s", type2char(asInteger(type)));
   }
 
   size_t offset = sizeof(R_allocator_t) + sizeof(SEXPREC_ALIGN);
   if (data->size - offset != expected_size) {
+    shm_free(&allocator, sptr);
     error("'alloc_from_shm' expected a shared memory object with %zu bytes but it has %zu bytes.",
-          expected_size + offset, data->size);
+          expected_size + offset, (size_t) asReal(size));
   }
 
 
   SEXP ret;
   if (!asLogical(copy) && asReal(length) >= 2) {
     ret = PROTECT(allocVector3(asInteger(type), asReal(length), &allocator));
+    VALGRIND_MAKE_MEM_DEFINED(DATAPTR(ret), dataptr_size);
   } else {
     ret = PROTECT(allocVector(asInteger(type), asReal(length)));
 
-    //if (LENGTH(ret) >= 1) {
-      memcpy(DATAPTR(ret), (char *) sptr + offset, data->size - offset);
-    //}
+    memcpy(DATAPTR(ret), (char *) sptr + offset, dataptr_size);
 
     shm_free(&allocator, sptr);
   }

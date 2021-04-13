@@ -74,6 +74,10 @@ such.
 See also the general notes on POSIX shared memory under
   \code{\link{mclapply}}.
 }
+\section{Windows Support}{
+ Not supported on Windows.
+}
+
 \section{Lifecycle}{
 
   \ifelse{html}{\href{https://lifecycle.r-lib.org/articles/stages.html#stable}{\figure{lifecycle-stable.svg}{options:
@@ -81,15 +85,17 @@ See also the general notes on POSIX shared memory under
 }
 
 \examples{
-x <- runif(100)
-obj <- copy2shm(x, "/random")
-if (inherits(obj, "shm_obj")) {
-  # copy2shm succeeded
-  y <- allocate_from_shm(obj)
-  stopifnot(identical(x, y))
-} else {
-  # copy2shm failed -> print the error message
-  print(obj)
+if (tolower(Sys.info()[["sysname"]]) != "windows") {
+  x <- runif(100)
+  obj <- copy2shm(x, "/random")
+  if (inherits(obj, "shm_obj")) {
+    # copy2shm succeeded
+    y <- allocate_from_shm(obj)
+    stopifnot(identical(x, y))
+  } else {
+    # copy2shm failed -> print the error message
+    print(obj)
+  }
 }
 
 }

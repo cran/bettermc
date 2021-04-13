@@ -27,10 +27,12 @@ mclapply(
   mc.allow.fatal = FALSE,
   mc.allow.error = FALSE,
   mc.retry = 0L,
+  mc.retry.silent = FALSE,
+  mc.retry.fixed.seed = FALSE,
   mc.fail.early = !(mc.allow.error || mc.retry != 0L),
   mc.dump.frames = c("partial", "full", "full_global", "no"),
   mc.dumpto = ifelse(interactive(), "last.dump", "file://last.dump.rds"),
-  mc.stdout = c("capture", "output"),
+  mc.stdout = c("capture", "output", "ignore"),
   mc.warnings = c("m_signal", "signal", "m_output", "output", "m_ignore", "ignore",
     "stop"),
   mc.messages = c("m_signal", "signal", "m_output", "output", "m_ignore", "ignore"),
@@ -69,12 +71,23 @@ crash_dumps  # environment with crash dumps created by mclapply (cf. mc.dumpto)
     \code{X} compared to \code{mc.cores}.}
 
 \item{mc.set.seed}{\code{TRUE} or \code{FALSE} are directly handled by
-\code{\link[parallel:mclapply]{parallel::mclapply}}. \code{bettermc} also
-supports two additional values: \code{NA} (the default) - seed every
-invocation of \code{FUN} differently but in a reproducible way based on the
-current state of the random number generator in the parent process.
-integerish value - call \code{set.seed(mc.set.seed)} in the parent and then
-continue as if \code{mc.set.seed} was \code{NA}.}
+  \code{\link[parallel:mclapply]{parallel::mclapply}}. \code{bettermc} also
+  supports two additional values: \code{NA} (the default) - seed every
+  invocation of \code{FUN} differently but in a reproducible way based on the
+  current state of the random number generator in the parent process.
+  integerish value - call \code{set.seed(mc.set.seed)} in the parent and then
+  continue as if \code{mc.set.seed} was \code{NA}.
+
+  In both (\code{NA}- and integerish-) cases, the state of the random number
+  generator, i.e. the object \code{.Random.seed} in the global environment,
+  is restored at the end of the function to what it was when \code{mclapply}
+  was called. If the random number generator is not yet initialized in the
+  current session, it is initialized internally (by calling \code{runif(1)})
+  and the resulting state is what gets restored later. In particular, this
+  means that the seed supplied as \code{mc.set.seed} does \emph{not} seed the
+  code following the call to \code{mclapply}. All this ensures that arguments
+  like \code{mc.cores}, \code{mc.force.fork} etc. can be adjusted without
+  affecting the state of the RNG outside of \code{mclapply}.}
 
 \item{mc.silent}{if set to \code{TRUE} then all output on
     \file{stdout} will be suppressed for all parallel processes forked
@@ -125,21 +138,33 @@ and potentially crash dumps (c.f. \code{mc.dump.frames} and
 \code{\link{etry}}).}
 
 \item{mc.retry}{\code{abs(mc.retry)} is the maximum number of retries of
-failed applications of \code{FUN} in case of both fatal and non-fatal
-errors. This is useful if we expect \code{FUN} to fail either randomly
-(e.g. non-convergence of a model) or temporarily (e.g. database
-connections). Additionally, if \code{mc.retry <= -1}, the value of
-\code{mc.cores} is gradually decreased with each retry to a minimum of 1 (2
-if \code{mc.force.fork = TRUE}). This is useful if we expect failures due
-to too many parallel processes, e.g. the Linux Out Of Memory Killer
-sacrificing some of the child processes.}
+  failed applications of \code{FUN} in case of both fatal and non-fatal
+  errors. This is useful if we expect \code{FUN} to fail either randomly
+  (e.g. non-convergence of a model) or temporarily (e.g. database
+  connections). Additionally, if \code{mc.retry <= -1}, the value of
+  \code{mc.cores} is gradually decreased with each retry to a minimum of 1 (2
+  if \code{mc.force.fork = TRUE}). This is useful if we expect failures due
+  to too many parallel processes, e.g. the Linux Out Of Memory Killer
+  sacrificing some of the child processes.
+
+  The environment variable "BMC_RETRY" indicates the current retry. A value
+  of "0" means first try, a value of "1" first \emph{re}try, etc.}
+
+\item{mc.retry.silent}{should the messages indicating both fatal and
+non-fatal failures during all but the last retry be suppressed
+(\code{TRUE}) or not (\code{FALSE}, default)?}
+
+\item{mc.retry.fixed.seed}{should \code{FUN} for a particular element of
+\code{X} always be invoked with the same fixed seed (\code{TRUE}) or should
+a different seed be used on each try (\code{FALSE}, default)? Only
+effective if \code{mc.set.seed} is \code{NA} or a number.}
 
 \item{mc.fail.early}{should we try to fail fast after encountering the first
 (non-fatal) error in \code{FUN}? Such errors will be recorded as objects of
 classes \code{c("fail-early-error", "try-error")}.}
 
 \item{mc.dump.frames}{should we \code{\link[utils]{dump.frames}} on non-fatal
-errors in \code{FUN}. The default "partial" omits the frames (roughly) up
+errors in \code{FUN}? The default "partial" omits the frames (roughly) up
 to the call of \code{FUN}. See \code{\link{etry}} for the other options.}
 
 \item{mc.dumpto}{where to save the result including the dumped frames if
@@ -152,9 +177,10 @@ path (prefixed with "file://") where to save the object.}
 parent process after \emph{all} calls of \code{FUN} of the current try (cf.
 \code{mc.retry}), such that it can be captured, sinked etc. there. "output"
 \emph{immediately} forwards the output to stdout of the parent; it cannot
-be captured, sinked etc. there. For consistency, all of this also applies
-if \code{FUN} is called directly from the main process, e.g. because
-\code{mc.cores = 1}.}
+be captured, sinked etc. there. "ignore" means that the output is not
+forwarded in any way to the parent process. For consistency, all of this
+also applies if \code{FUN} is called directly from the main process, e.g.
+because \code{mc.cores = 1}.}
 
 \item{mc.warnings, mc.messages, mc.conditions}{how should warnings, messages
 and other conditions signaled by \code{FUN} be handled? "signal" records
@@ -283,6 +309,30 @@ display a progress bar.}
   \code{/dev/shm}) must be (re)mounted with option \emph{huge=advise}, i.e.
   \code{mount -o remount,huge=advise /dev/shm}. (The default is
   \code{huge=never}, but this might be distribution-specific.)
+}
+
+\section{Windows Support}{
+ On Windows, otherwise valid values for various
+  arguments are silently replaced as follows:
+\preformatted{  mc.cores <- 1L
+  mc.share.vectors <- Inf
+  mc.shm.ipc <- FALSE
+  mc.force.fork <- FALSE
+  mc.progress <- FALSE
+  if (mc.stdout == "output") mc.stdout <- "ignore"
+  if (mc.warnings == "output") mc.warnings <- "ignore"
+  if (mc.messages == "output") mc.messages <- "ignore"}
+
+  \bold{Note:} \code{\link[parallel:mclapply]{parallel::mclapply}} demands
+  \code{mc.cores} to be exactly 1 on Windows; \code{bettermc::mclapply} sets
+  it to 1 on Windows.
+
+  Furthermore, \code{\link[parallel:mclapply]{parallel::mclapply}} ignores
+  the following arguments on Windows: \code{mc.preschedule, mc.silent,
+  mc.cleanup, mc.allow.recursive, affinity.list}. For \code{mc.set.seed},
+  only the values \code{TRUE} and \code{FALSE} are ignored (by
+  \code{\link[parallel:mclapply]{parallel::mclapply}}); the other values are
+  handled by \code{bettermc::mclapply} as documented above.
 }
 
 \section{Lifecycle}{

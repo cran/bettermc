@@ -1,12 +1,15 @@
 ALTREP
+BMC
 CHARSXPs
 Crashdumps
 Hugepage
+KiB
 Lifecycle
 MiB
 Parallelization
 Tracebacks
 UX
+Valgrind
 allocator
 capturable
 codecov
