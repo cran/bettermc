@@ -1,5 +1,7 @@
 #include "bettermc.h"
 
+#ifndef _WIN32
+
 #include <sys/types.h>
 #include <sys/sem.h>
 #include <errno.h>
@@ -70,6 +72,7 @@ SEXP semaphorev_post(SEXP sid, SEXP undo) {
 
 SEXP semaphorev_unlink(SEXP sid) {
   union semun dummy;
+  dummy.val = 0;  // ignored; just to silence a clang -Wuninitialized
 
   int semid = asInteger(sid);
 
@@ -79,3 +82,23 @@ SEXP semaphorev_unlink(SEXP sid) {
 
   return R_NilValue;
 }
+
+#else
+
+SEXP semaphorev_open(SEXP value) {
+  error("Not supported on Windows.");
+}
+
+SEXP semaphorev_wait(SEXP sid, SEXP undo) {
+  error("Not supported on Windows.");
+}
+
+SEXP semaphorev_post(SEXP sid, SEXP undo) {
+  error("Not supported on Windows.");
+}
+
+SEXP semaphorev_unlink(SEXP sid) {
+  error("Not supported on Windows.");
+}
+
+#endif

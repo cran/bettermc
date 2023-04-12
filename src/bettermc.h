@@ -2,7 +2,6 @@
 #define BETTERMC_H
 
 #define _POSIX_C_SOURCE 200112L
-#define USE_RINTERNALS // for definition of SEXPREC_ALIGN
 
 #include "Rinternals.h"
 
@@ -23,6 +22,7 @@ SEXP semaphore_post(SEXP);
 SEXP semaphore_wait(SEXP);
 SEXP semaphore_close(SEXP);
 SEXP semaphore_unlink(SEXP);
+SEXP sigterm(SEXP);
 
 SEXP semaphorev_open(SEXP);
 SEXP semaphorev_post(SEXP, SEXP);
@@ -30,5 +30,6 @@ SEXP semaphorev_wait(SEXP, SEXP);
 SEXP semaphorev_unlink(SEXP);
 
 SEXP is_uneval_promise(SEXP, SEXP);
+SEXP is_eval_promise_to_missing_arg(SEXP, SEXP);
 
 #endif

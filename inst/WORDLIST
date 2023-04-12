@@ -11,13 +11,16 @@ Rinternals
 Tracebacks
 UX
 Valgrind
+Wuninitialized
 allocator
+bettermcExt
 capturable
 codecov
 crashdumps
 de
 deserialized
 dev
+doMC
 etry
 hyperthread
 idx
@@ -25,6 +28,7 @@ implementational
 integerish
 macOS
 mclapply
+md
 muffleMessage
 muffleWarning
 parallelization
@@ -32,10 +36,12 @@ prescheduling
 radix
 rchk
 reproducibly
+rstan
 sem
 semv
 shm
 sinked
+src
 stderr
 stdout
 tmpfs

@@ -116,9 +116,16 @@ test_that("returning recursive environments using shared memory works", {
 })
 
 test_that("mc.progress works", {
-  expect_silent(
-    bettermc::mclapply(1:2, function(i) i, mc.progress = TRUE, mc.cores = 1)
-  )
+  if (requireNamespace("progress", quietly = TRUE)) {
+    expect_silent(
+      bettermc::mclapply(1:2, function(i) i, mc.progress = TRUE, mc.cores = 1)
+    )
+  } else {
+    expect_message(
+      bettermc::mclapply(1:2, function(i) i, mc.progress = TRUE, mc.cores = 1),
+      "Please install the progress-package in order to get a progress bar"
+    )
+  }
 })
 
 test_that("returning special vaules works correctly", {
@@ -355,6 +362,9 @@ test_that("mclapply works in edge cases", {
   al <- structure(list(character()), some_attr = 951)
   expect_identical(bettermc::mclapply(al, function(x) x),
                    parallel::mclapply(al, function(x) x))
+
+  expect_identical(names(bettermc::mclapply(character(), function(x) x)),
+                   character())
 })
 
 test_that("mc.force.fork correctly adjusts affinity.list", {
@@ -362,4 +372,39 @@ test_that("mc.force.fork correctly adjusts affinity.list", {
   expect_silent(bettermc::mclapply(1, function(i) i, mc.preschedule = FALSE, mc.force.fork = TRUE, affinity.list = 1))
   expect_silent(bettermc::mclapply(1, function(i) i, mc.preschedule = FALSE, mc.force.fork = TRUE, affinity.list = list(1)))
   expect_silent(bettermc::mclapply(1, function(i) i, mc.preschedule = FALSE, mc.force.fork = TRUE, affinity.list = list(c(1, 2))))
+})
+
+test_that("results are properly named", {
+  expect_identical(names(bettermc::mclapply(letters, function(x) x)),
+                   letters)
+
+  X <- letters
+  names(X) <- seq_along(X)
+  expect_identical(names(bettermc::mclapply(X, function(x) x)),
+                   names(X))
+})
+
+test_that("mc.system.time works", {
+  skip_on_os("windows")
+  ret <- suppressWarnings(
+    bettermc::mclapply(1:4, function(i) {
+      if (i == 3) {
+        system(sprintf("kill %d", Sys.getpid()))
+      } else if (i == 4) {
+        stop("eee")
+      } else {
+        Sys.sleep(i)
+      }
+    },
+    mc.system.time = TRUE, mc.allow.error = TRUE,
+    mc.allow.fatal = TRUE, mc.preschedule = FALSE)
+  )
+
+  ret <- attr(ret, "system_times")
+  ret <- lapply(ret, `[`, i = "elapsed")
+
+  expect_gte(ret[[1]], 1)
+  expect_gte(ret[[2]], 2)
+  expect_null(ret[[3]])
+  expect_lt(ret[[4]], 1)
 })

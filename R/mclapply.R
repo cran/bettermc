@@ -32,6 +32,8 @@
 #'   code following the call to \code{mclapply}. All this ensures that arguments
 #'   like \code{mc.cores}, \code{mc.force.fork} etc. can be adjusted without
 #'   affecting the state of the RNG outside of \code{mclapply}.
+#' @param mc.use.names if \code{TRUE} and if \code{X} is character, use \code{X}
+#'   as names for the result unless it had names already.
 #' @param mc.allow.fatal should fatal errors in child processes make
 #'   \code{mclapply} fail (\code{FALSE}, default) or merely trigger a warning
 #'   (\code{TRUE})?
@@ -41,15 +43,18 @@
 #'   \code{\link[parallel:mclapply]{parallel::mclapply}}, it is OK for
 #'   \code{FUN} to return \code{NULL}.
 #'
+#'   \code{NA} returns the same as \code{TRUE}, but without a warning.
+#'
 #'   \code{mc.allow.fatal} can also be \code{NULL}. In this case \code{NULL} is
-#'   returned, which corresponds to the behavior of
+#'   returned (and a warning is signaled), which corresponds to the behavior of
 #'   \code{\link[parallel:mclapply]{parallel::mclapply}}.
 #' @param mc.allow.error should non-fatal errors in \code{FUN} make
 #'   \code{mclapply} fail (\code{FALSE}, default) or merely trigger a warning
 #'   (\code{TRUE})? In the latter case, errors are stored as class
 #'   \code{c("etry-error", "try-error")} objects, which contain full tracebacks
 #'   and potentially crash dumps (c.f. \code{mc.dump.frames} and
-#'   \code{\link{etry}}).
+#'   \code{\link{etry}}). \code{NA} returns the same as \code{TRUE}, but without
+#'   a warning.
 #' @param mc.retry \code{abs(mc.retry)} is the maximum number of retries of
 #'   failed applications of \code{FUN} in case of both fatal and non-fatal
 #'   errors. This is useful if we expect \code{FUN} to fail either randomly
@@ -101,6 +106,11 @@
 #'   "muffleWarning"/"muffleMessage" restart in the child process. Note that, if
 #'   \code{FUN} is called directly from the main process, conditions might be
 #'   signaled twice in the main process, depending on these arguments.
+#' @param mc.system.time should \code{\link{system.time}} be used to measure
+#'   CPU (and other) times used by the invocations of \code{FUN}. If
+#'   \code{TRUE}, the list returned will have an attribute "system_times", which
+#'   itself is a list of the same length as \code{X} containing the time
+#'   measurements.
 #' @param mc.compress.chars should character vectors be compressed using
 #'   \code{\link{char_map}} before returning them from the child process? Can
 #'   also be the minimum length of character vectors for which to enable
@@ -225,12 +235,12 @@ mclapply <- function(X, FUN, ...,
                      mc.preschedule = TRUE, mc.set.seed = NA,
                      mc.silent = FALSE, mc.cores = getOption("mc.cores", 2L),
                      mc.cleanup = TRUE, mc.allow.recursive = TRUE,
-                     affinity.list = NULL,
+                     affinity.list = NULL, mc.use.names = TRUE,
                      mc.allow.fatal = FALSE, mc.allow.error = FALSE,
                      mc.retry = 0L,
                      mc.retry.silent = FALSE,
                      mc.retry.fixed.seed = FALSE,
-                     mc.fail.early = !(mc.allow.error || mc.retry != 0L),
+                     mc.fail.early = isFALSE(mc.allow.error) && mc.retry == 0L,
                      mc.dump.frames = c("partial", "full", "full_global", "no"),
                      mc.dumpto = ifelse(interactive(), "last.dump",
                                         "file://last.dump.rds"),
@@ -240,6 +250,7 @@ mclapply <- function(X, FUN, ...,
                      mc.messages = c("m_signal", "signal", "m_output", "output",
                                      "m_ignore", "ignore"),
                      mc.conditions = c("signal", "ignore"),
+                     mc.system.time = FALSE,
                      mc.compress.chars = TRUE,
                      mc.compress.altreps = c("if_allocated", "yes", "no"),
                      mc.share.vectors = getOption("bettermc.use_shm", TRUE),
@@ -256,13 +267,15 @@ mclapply <- function(X, FUN, ...,
   if (!length(X)) {
     res <- list()
     names(res) <- names(X)
+    if (mc.use.names && is.character(X) && is.null(names(res))) names(res) <- X
     return(res)
   }
 
   checkmate::qassert(mc.set.seed, c("b1", "n1"))
 
-  checkmate::assert_flag(mc.allow.fatal, null.ok = TRUE)
-  checkmate::assert_flag(mc.allow.error)
+  checkmate::assert_flag(mc.use.names)
+  checkmate::assert_flag(mc.allow.fatal, na.ok = TRUE, null.ok = TRUE)
+  checkmate::assert_flag(mc.allow.error, na.ok = TRUE)
   checkmate::assert_int(mc.retry)
   checkmate::assert_flag(mc.retry.silent)
   checkmate::assert_flag(mc.retry.fixed.seed)
@@ -282,6 +295,7 @@ mclapply <- function(X, FUN, ...,
     mc.messages <- sub("^m_", "", mc.messages)
   }
   mc.conditions <- match.arg(mc.conditions)
+  checkmate::assert_flag(mc.system.time)
   mc.compress.altreps <- match.arg(mc.compress.altreps)
   mc.share.altreps <- match.arg(mc.share.altreps)
 
@@ -302,6 +316,9 @@ mclapply <- function(X, FUN, ...,
   checkmate::assert_flag(mc.force.fork)
   if (mc.force.fork && mc.cores < 2L) {
     stop("'mc.force.fork' requires 'mc.cores' to be at least 2.")
+  }
+  if (mc.force.fork && !mc.allow.recursive) {
+    stop("'mc.force.fork' requires 'mc.allow.recursive' to be TRUE.")
   }
 
   checkmate::assert_flag(mc.progress)
@@ -581,23 +598,29 @@ mclapply <- function(X, FUN, ...,
       # etry-error-object
       if (mc.stdout == "capture") {
         output <- capture.output(
+          proc_time <- system.time(
+            res <- etry(withCallingHandlers(list(FUN(X, ...)),
+                                            warning = whandler,
+                                            message = mhandler,
+                                            condition = chandler),
+                        silent = TRUE,
+                        dump.frames = if (tries_left) "no" else mc.dump.frames),
+            gcFirst = FALSE
+          )
+        )
+        if (length(output)) attr(res, "bettermc_output") <- output
+      } else {
+        proc_time <- system.time(
           res <- etry(withCallingHandlers(list(FUN(X, ...)),
                                           warning = whandler,
                                           message = mhandler,
                                           condition = chandler),
                       silent = TRUE,
-                      dump.frames = if (tries_left) "no" else mc.dump.frames)
+                      dump.frames = if (tries_left) "no" else mc.dump.frames),
+          gcFirst = FALSE
         )
-        if (length(output)) attr(res, "bettermc_output") <- output
-      } else {
-        res <- etry(withCallingHandlers(list(FUN(X, ...)),
-                                        warning = whandler,
-                                        message = mhandler,
-                                        condition = chandler),
-                    silent = TRUE,
-                    dump.frames = if (tries_left) "no" else mc.dump.frames)
       }
-
+      if (mc.system.time) attr(res, "bettermc_system_time") <- proc_time
 
       # make consecutive invocations of this wrapper fail early
       if (mc.fail.early && inherits(res, "etry-error")) file.create(error_file)
@@ -648,7 +671,7 @@ mclapply <- function(X, FUN, ...,
       X_seq <- seq_along(X)
     }
     withCallingHandlers(
-      res <- parallel::mclapply(
+      res <- parallel_mclapply(
         X = X_seq, FUN = wrapper, ... = ...,
         mc.preschedule = mc.preschedule, mc.set.seed = mc.set.seed,
         mc.silent = mc.silent, mc.cores = mc.cores,
@@ -689,16 +712,31 @@ mclapply <- function(X, FUN, ...,
       for (i in seq_len(mc_fatal)) {
         sem_post(sem)
       }
+
       # suppressWarnings due to https://bugs.r-project.org/bugzilla/show_bug.cgi?id=18078:
       # we don't really mind if the progress_job was erroneously killed, but we
       # don't want to see a warning because of this;
       # if there is a warning signaled then most probably the progress process
-      # was killed -> clear the incomplete line on stderr
-      withCallingHandlers(parallel::mccollect(progress_job),
-                          warning = function(w) {
-                            cat("\r", file = stderr())
-                            tryInvokeRestart("muffleWarning")
-                          })
+      # was killed -> move cursor to next line on stderr
+      #
+      # do not wait here to no block the main session in case progress_job is stuck
+      progress_job_res <-
+        withCallingHandlers(parallel::mccollect(progress_job, wait = FALSE, timeout = 1),
+                            warning = function(w) {
+                              cat("\n", file = stderr())
+                              tryInvokeRestart("muffleWarning")
+                            })
+
+      if (is.null(progress_job_res)) {
+        # progress job was not done yet -> terminate it
+        .Call(C_sigterm, progress_job[["pid"]])
+        # collect again to avoid zombie process
+        withCallingHandlers(parallel::mccollect(progress_job, wait = FALSE, timeout = 1),
+                            warning = function(w) {
+                              cat("\n", file = stderr())
+                              tryInvokeRestart("muffleWarning")
+                            })
+      }
     }
 
     if (mc.shm.ipc) {
@@ -834,6 +872,12 @@ mclapply <- function(X, FUN, ...,
     affinity.list <- affinity.list_orig[X_seq]
   }
 
+  system_times <- if (mc.system.time) {
+    lapply(res, attr, which = "bettermc_system_time")
+  } else {
+    NULL
+  }
+
   # remove the list()-wrapper around each (non-error) element & potentially
   # introduce explicit fatal errors;
   # also check for non-fatal and fatal errors
@@ -859,11 +903,16 @@ mclapply <- function(X, FUN, ...,
     }
   })
 
+  attr(res, "system_times") <- system_times
+
   names(res) <- names(X_orig)
+  if (mc.use.names && is.character(X_orig) && is.null(names(res))) {
+    names(res) <- X_orig
+  }
 
   # create crash dump; do this only here such that res is fully processed, i.e.
   # list wrappers removed, named etc.
-  if (error_idx && !mc.allow.error && mc.dump.frames != "no") {
+  if (error_idx && isFALSE(mc.allow.error) && mc.dump.frames != "no") {
     if (grepl("^file://", mc.dumpto)) {
       file <- gsub("^file://", "", mc.dumpto)
       if (inherits(try(saveRDS(res, file)), "try-error")) {
@@ -895,9 +944,9 @@ mclapply <- function(X, FUN, ...,
     msg <- "at least one scheduled core did not return results;" %\%
       "maybe it was killed (by the Linux Out of Memory Killer ?) or there" %\%
       "was a fatal error in the forked process(es)"
-    if (!isFALSE(mc.allow.fatal)) {
+    if (is.null(mc.allow.fatal) || isTRUE(mc.allow.fatal)) {
       w_list <- c(w_list, list(msg))
-    } else {
+    } else if (isFALSE(mc.allow.fatal)) {
       e_list <- c(e_list, list(msg))
     }
   }
@@ -906,9 +955,9 @@ mclapply <- function(X, FUN, ...,
     orig_message <- res[[error_idx]]
     msg <- "error(s) occured during mclapply; first original message:\n\n" %+%
       paste0(capture.output(orig_message), collapse = "\n")
-    if (mc.allow.error) {
+    if (isTRUE(mc.allow.error)) {
       w_list <- c(w_list, list(msg))
-    } else {
+    } else if (isFALSE(mc.allow.error)) {
       e_list <- c(e_list, list(msg))
     }
   }
@@ -941,3 +990,5 @@ mclapply <- function(X, FUN, ...,
 #'   \code{mc.dump.frames != "no" & mc.allow.error == FALSE}.
 #' @export
 crash_dumps <- NULL  # environment is created in .onLoad()
+
+parallel_mclapply <- NULL

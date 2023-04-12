@@ -24,12 +24,13 @@ mclapply(
   mc.cleanup = TRUE,
   mc.allow.recursive = TRUE,
   affinity.list = NULL,
+  mc.use.names = TRUE,
   mc.allow.fatal = FALSE,
   mc.allow.error = FALSE,
   mc.retry = 0L,
   mc.retry.silent = FALSE,
   mc.retry.fixed.seed = FALSE,
-  mc.fail.early = !(mc.allow.error || mc.retry != 0L),
+  mc.fail.early = isFALSE(mc.allow.error) && mc.retry == 0L,
   mc.dump.frames = c("partial", "full", "full_global", "no"),
   mc.dumpto = ifelse(interactive(), "last.dump", "file://last.dump.rds"),
   mc.stdout = c("capture", "output", "ignore"),
@@ -37,6 +38,7 @@ mclapply(
     "stop"),
   mc.messages = c("m_signal", "signal", "m_output", "output", "m_ignore", "ignore"),
   mc.conditions = c("signal", "ignore"),
+  mc.system.time = FALSE,
   mc.compress.chars = TRUE,
   mc.compress.altreps = c("if_allocated", "yes", "no"),
   mc.share.vectors = getOption("bettermc.use_shm", TRUE),
@@ -117,6 +119,9 @@ crash_dumps  # environment with crash dumps created by mclapply (cf. mc.dumpto)
     allowed to run, see \code{\link[parallel]{mcaffinity}}.  To use this parameter
     prescheduling has to be deactivated (\code{mc.preschedule = FALSE}).}
 
+\item{mc.use.names}{if \code{TRUE} and if \code{X} is character, use \code{X}
+as names for the result unless it had names already.}
+
 \item{mc.allow.fatal}{should fatal errors in child processes make
   \code{mclapply} fail (\code{FALSE}, default) or merely trigger a warning
   (\code{TRUE})?
@@ -126,8 +131,10 @@ crash_dumps  # environment with crash dumps created by mclapply (cf. mc.dumpto)
   \code{\link[parallel:mclapply]{parallel::mclapply}}, it is OK for
   \code{FUN} to return \code{NULL}.
 
+  \code{NA} returns the same as \code{TRUE}, but without a warning.
+
   \code{mc.allow.fatal} can also be \code{NULL}. In this case \code{NULL} is
-  returned, which corresponds to the behavior of
+  returned (and a warning is signaled), which corresponds to the behavior of
   \code{\link[parallel:mclapply]{parallel::mclapply}}.}
 
 \item{mc.allow.error}{should non-fatal errors in \code{FUN} make
@@ -135,7 +142,8 @@ crash_dumps  # environment with crash dumps created by mclapply (cf. mc.dumpto)
 (\code{TRUE})? In the latter case, errors are stored as class
 \code{c("etry-error", "try-error")} objects, which contain full tracebacks
 and potentially crash dumps (c.f. \code{mc.dump.frames} and
-\code{\link{etry}}).}
+\code{\link{etry}}). \code{NA} returns the same as \code{TRUE}, but without
+a warning.}
 
 \item{mc.retry}{\code{abs(mc.retry)} is the maximum number of retries of
   failed applications of \code{FUN} in case of both fatal and non-fatal
@@ -195,6 +203,12 @@ Options prefixed with "m" additionally try to invoke the
 "muffleWarning"/"muffleMessage" restart in the child process. Note that, if
 \code{FUN} is called directly from the main process, conditions might be
 signaled twice in the main process, depending on these arguments.}
+
+\item{mc.system.time}{should \code{\link{system.time}} be used to measure
+CPU (and other) times used by the invocations of \code{FUN}. If
+\code{TRUE}, the list returned will have an attribute "system_times", which
+itself is a list of the same length as \code{X} containing the time
+measurements.}
 
 \item{mc.compress.chars}{should character vectors be compressed using
 \code{\link{char_map}} before returning them from the child process? Can
